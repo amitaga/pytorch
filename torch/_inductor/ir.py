@@ -3602,6 +3602,9 @@ class ExternKernel(InputsKernel):
             f"arg {arg_name} not found in self.kwargs or self.kwargs_default_value"
         )
 
+    def is_legacy_abi_kernel(self):
+        return False
+
     def codegen_kwargs(self):
         if not self.kwargs:
             return []
@@ -3615,7 +3618,16 @@ class ExternKernel(InputsKernel):
             kwargs = []
             for arg_name in self.ordered_kwargs_for_cpp_kernel:
                 v = self.get_kwargs_value(arg_name)
-                kwargs.append(V.graph.wrapper_code.val_to_arg_str(v))
+                # FIXME We should let ExternKernel have access to the cpp schema where possible.
+                if hasattr(self, "kwargs_default_value"):
+                    type_ = self.kwargs_default_value.get(arg_name).get("type")
+                else:
+                    type_ = None
+                kwargs.append(
+                    V.graph.wrapper_code.val_to_cpp_arg_str(
+                        type_, v, self.is_legacy_abi_kernel()
+                    )
+                )
         else:
             kwargs = [
                 f"{k}={V.graph.wrapper_code.val_to_arg_str(v)}"
@@ -4242,6 +4254,9 @@ class FallbackKernel(ExternKernelAlloc):
             x.name for x in kernel._schema.arguments if x.kwarg_only
         ]
 
+    def is_legacy_abi_kernel(self):
+        return "_scaled_dot_product_flash_attention" in str(self.kernel)
+
     def get_arg_default_value(self, pos):
         assert hasattr(
             self, "args_default_value"
@@ -4261,7 +4276,17 @@ class FallbackKernel(ExternKernelAlloc):
 
         tensor_args = [Shim(x.codegen_reference()) for x in self.inputs]
         args, kwargs = self.unflatten_args(tensor_args, self.constant_args)
-        args = [V.graph.wrapper_code.val_to_arg_str(x) for x in args]
+
+        if V.graph.cpp_wrapper:
+            args = [
+                V.graph.wrapper_code.val_to_cpp_arg_str(
+                    param.real_type, x, self.is_legacy_abi_kernel()
+                )
+                for param, x in zip(self.op_overload._schema.arguments, args)
+            ]
+        else:
+            args = [V.graph.wrapper_code.val_to_arg_str(x) for x in args]
+
         # Previously, we want to maintain forward-compatibility by skipping
         # default args in the serialized artifacts in fbcode. However,
         # some of our shim interfaces require default values being set.
