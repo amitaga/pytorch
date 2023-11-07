@@ -45,7 +45,7 @@ from torch.utils._python_dispatch import (
     TorchDispatchMode,
 )
 
-from torch.utils._pytree import PyTree, tree_map
+from torch.utils._pytree import PyTree, tree_map, tree_map_only, tree_flatten
 from torch.utils._stats import count, count_label
 from torch.utils.weak import WeakIdRef
 
@@ -1312,6 +1312,52 @@ class FakeTensor(torch.Tensor):
 # new allocations of Tensors which have non-meta storage so
 # memory should not significantly increase.
 
+def get_tensor_hash(x):
+    if isinstance(x, torch.Tensor):
+        return tuple(x.shape), tuple(x.stride()), x.dtype
+    return x
+
+# import optree
+def hash_op(func, args, kwargs):
+    flatten = tree_flatten((args, kwargs))[0]
+    return func, tuple(get_tensor_hash(x) for x in flatten)
+
+cache = {}
+
+def cache_dispatch(dispatch):
+    def _dispatch(self, func, types, args=(), kwargs=None):
+        if func == torch.ops.prim.device.default:
+            return dispatch(self, func, types, args, kwargs)
+        arg_hash = hash_op(func, args, kwargs)
+        if arg_hash not in cache:
+            # print(func, args, kwargs)
+            output_tensor = dispatch(self, func, types, args, kwargs)
+            if isinstance(output_tensor, FakeTensor):
+                metadata = (
+                    output_tensor.shape,
+                    output_tensor.stride(),
+                    output_tensor.dtype,
+                    output_tensor.device,
+                )
+                cache[arg_hash] = metadata
+            return output_tensor
+        else:
+            metadata = cache[arg_hash]
+
+            return FakeTensor(
+                self,
+                torch.empty_strided(
+                    metadata[0],
+                    metadata[1],
+                    dtype=metadata[2],
+                    device='meta'
+                ),
+                device=metadata[3],
+            )
+    return _dispatch
+
+
+cnt = 0
 
 class FakeTensorMode(TorchDispatchMode):
     def __init__(
@@ -1412,6 +1458,7 @@ class FakeTensorMode(TorchDispatchMode):
             if maybe_prev_fake_mode is not None:
                 torch._C._set_dispatch_mode(maybe_prev_fake_mode)
 
+    @cache_dispatch
     def dispatch(self, func, types, args=(), kwargs=None):
         kwargs = kwargs if kwargs else {}
         log.debug("%s %s %s", func, args, kwargs)
@@ -1441,6 +1488,11 @@ class FakeTensorMode(TorchDispatchMode):
             )
             incr = IncrementRecursionCount()
 
+        global cnt
+        cnt += 1
+        if cnt % 1000 == 0:
+            print(cnt)
+        # print(func)
         # Some attribute queries that can be serviced directly
         # See Note [is_coalesced is dispatched]
         if func in {
