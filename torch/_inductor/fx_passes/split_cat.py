@@ -28,11 +28,21 @@ from ..pattern_matcher import (
 )
 from .pre_grad import (
     merge_getitem_cat_pass,
+    remove_unsqueeze_pass,
     merge_splits_pass,
     normalization_pass,
     split_cat_pass,
     unbind_stack_pass,
 )
+
+try:
+    # importing this will register fbgemm lowerings for inductor
+    import deeplearning.fbgemm.fbgemm_gpu.fb.inductor_lowerings  # noqa: F401
+
+    has_fbgemm = True
+except Exception:
+    has_fbgemm = False
+    pass
 
 log = logging.getLogger(__name__)
 
@@ -1368,3 +1378,26 @@ def merge_stack_tahn_unbind(match: Match, split_sections: List[int], dim: int):
                 split_sections = new_split_sections
 
                 counters["inductor"]["stack_tahn_unbind_merged"] += 1
+
+
+# We find the unsqueeze_n_times(*, 0), which could be removed to further enable followup fusion
+if has_fbgemm:
+    @register_graph_pattern(
+        CallFunction(
+            torch.ops.fb.unsqueeze_n_times,
+            Ignored(),
+            0,
+        ),
+        pass_dict=remove_unsqueeze_pass,
+        extra_check=config_flag("split_cat_fx_passes"),
+    )
+    def remove_unsqueeze_node(match: Match, *args, **kwargs):
+        graph = match.graph
+        unsqueeze_node = match.nodes[0]
+        input = get_arg_value(unsqueeze_node, 0, "input")
+        users = list(unsqueeze_node.users)
+        for user in users:
+            user.replace_input_with(unsqueeze_node, input)
+        graph.erase_node(unsqueeze_node)
+
+        counters["inductor"]["remove_unsqueeze"] += 1
