@@ -796,12 +796,15 @@ bool TensorIteratorBase::is_contiguous() const {
 
 bool TensorIteratorBase::is_scalar(int arg) const {
   const auto& stride = operands_[arg].stride_bytes;
+  bool has_non_zero_strides = false;
   for (const auto i : c10::irange(ndim())) {
-    if (stride[i] != 0 && shape_[i] != 1) {
+    const auto is_stride_non_zero = stride[i] != 0;
+    if (is_stride_non_zero && shape_[i] != 1) {
       return false;
     }
+    has_non_zero_strides |= is_stride_non_zero;
   }
-  return true;
+  return has_non_zero_strides;
 }
 
 bool TensorIteratorBase::is_cpu_scalar(int arg) const {
